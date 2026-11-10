@@ -1240,18 +1240,18 @@ CONST UINT8
 };
 
 STATIC
-CONST UINT8
+UINT8
   mProvideCurrentCpuInfoTopologyCorePerPackageV1Replace[] = {
   // mov  eax, r13d
-  // mov  eax, 0x80    <--- start
+  // mov  eax, capacity    <--- start
   // mov  dword[], eax
-  0xB8, 0x80, 0x00, 0x00, 0x00, 0x89
+  0xB8, 0x00, 0x00, 0x00, 0x00, 0x89
 };
 
 STATIC
 PATCHER_GENERIC_PATCH
   mProvideCurrentCpuInfoTopologyCorePerPackageV1Patch = {
-  .Comment     = DEBUG_POINTER ("Set core per package count to 128 V1"),
+  .Comment     = DEBUG_POINTER ("Set core per package capacity V1"),
   .Base        = NULL,
   .Find        = mProvideCurrentCpuInfoTopologyCorePerPackageV1Find,
   .Mask        = NULL,
@@ -1274,18 +1274,18 @@ CONST UINT8
 };
 
 STATIC
-CONST UINT8
+UINT8
   mProvideCurrentCpuInfoTopologyCorePerPackageV1_5Replace[] = {
   // mov  edx, r13d
-  // mov  edx, 0x80    <--- start
+  // mov  edx, capacity    <--- start
   // mov  dword[], edx
-  0xBA, 0x80, 0x00, 0x00, 0x00, 0x89
+  0xBA, 0x00, 0x00, 0x00, 0x00, 0x89
 };
 
 STATIC
 PATCHER_GENERIC_PATCH
   mProvideCurrentCpuInfoTopologyCorePerPackageV1_5Patch = {
-  .Comment     = DEBUG_POINTER ("Set core per package count to 128 V1_5"),
+  .Comment     = DEBUG_POINTER ("Set core per package capacity V1_5"),
   .Base        = NULL,
   .Find        = mProvideCurrentCpuInfoTopologyCorePerPackageV1_5Find,
   .Mask        = NULL,
@@ -1314,20 +1314,20 @@ CONST UINT8
 };
 
 STATIC
-CONST UINT8
+UINT8
   mProvideCurrentCpuInfoTopologyCorePerPackageV2Replace[] = {
   // mov  eax/edx, r13d
   // shr  eax/edx, 0x1a    <--- start
   // nop
-  // mov  al/dl, 128
+  // mov  al/dl, capacity
   // mov  dword[], eax/edx
-  0xC1, 0xE8 /* 0xEA */, 0x1A, 0x90, 0xB0 /* 0xB2 */, 0x80, 0x89
+  0xC1, 0xE8 /* 0xEA */, 0x1A, 0x90, 0xB0 /* 0xB2 */, 0x00, 0x89
 };
 
 STATIC
 PATCHER_GENERIC_PATCH
   mProvideCurrentCpuInfoTopologyCorePerPackageV2Patch = {
-  .Comment     = DEBUG_POINTER ("Set core per package count to 128 V2"),
+  .Comment     = DEBUG_POINTER ("Set core per package capacity V2"),
   .Base        = NULL,
   .Find        = mProvideCurrentCpuInfoTopologyCorePerPackageV2Find,
   .Mask        = mProvideCurrentCpuInfoTopologyCorePerPackageV2Mask,
@@ -1344,11 +1344,14 @@ EFI_STATUS
 PatchProvideCurrentCpuInfoMSR35h (
   IN OUT PATCHER_CONTEXT  *Patcher,
   IN     OC_CPU_INFO      *CpuInfo,
-  IN     UINT32           KernelVersion
+  IN     UINT32           KernelVersion,
+  IN     UINT32           Cpuid1Ebx,
+  IN     UINT32           Cpuid1Edx
   )
 {
   EFI_STATUS  Status;
   UINT32      CoreThreadCount;
+  UINT32      LogicalPerPackage;
   BOOLEAN     IsAmpCpu;
 
   //
@@ -1360,7 +1363,36 @@ PatchProvideCurrentCpuInfoMSR35h (
     return EFI_SUCCESS;
   }
 
+  if (  (CpuInfo->CoreCount == 0)
+     || (CpuInfo->ThreadCount == 0)
+     || (CpuInfo->ThreadCount < CpuInfo->CoreCount))
+  {
+    DEBUG ((DEBUG_WARN, "OCAK: Invalid enabled CPU core/thread counts %u/%u\n", CpuInfo->CoreCount, CpuInfo->ThreadCount));
+    return EFI_INVALID_PARAMETER;
+  }
+
   IsAmpCpu = (CpuInfo->ThreadCount % CpuInfo->CoreCount) != 0;
+
+  if (IsAmpCpu) {
+    //
+    // XNU obtains logical_per_package from CPUID.1:EBX[23:16], or uses
+    // one when HTT is clear. Use the same effective CPUID values as XNU.
+    // Flattening AMP cores to threads requires a capacity ratio of one.
+    // A fixed 128 can exceed logical_per_package and produce a zero divisor.
+    //
+    LogicalPerPackage = (Cpuid1Edx & CPUID_FEATURE_HTT) != 0
+                        ? (Cpuid1Ebx >> 16U) & 0xFFU
+                        : 1U;
+    if (LogicalPerPackage < CpuInfo->ThreadCount) {
+      DEBUG ((DEBUG_WARN, "OCAK: Invalid AMP package capacity %u for %u threads\n", LogicalPerPackage, CpuInfo->ThreadCount));
+      return EFI_INVALID_PARAMETER;
+    }
+
+    CopyMem (&mProvideCurrentCpuInfoTopologyCorePerPackageV1Replace[1], &LogicalPerPackage, sizeof (UINT32));
+    CopyMem (&mProvideCurrentCpuInfoTopologyCorePerPackageV1_5Replace[1], &LogicalPerPackage, sizeof (UINT32));
+    mProvideCurrentCpuInfoTopologyCorePerPackageV2Replace[5] = (UINT8)LogicalPerPackage;
+    DEBUG ((DEBUG_INFO, "OCAK: AMP core per package capacity %u\n", LogicalPerPackage));
+  }
 
   //
   // Provide real values for normal CPUs.
@@ -1557,7 +1589,9 @@ EFI_STATUS
 PatchProvideCurrentCpuInfo (
   IN OUT PATCHER_CONTEXT  *Patcher,
   IN     OC_CPU_INFO      *CpuInfo,
-  IN     UINT32           KernelVersion
+  IN     UINT32           KernelVersion,
+  IN     UINT32           Cpuid1Ebx,
+  IN     UINT32           Cpuid1Edx
   )
 {
   EFI_STATUS  Status;
@@ -1643,8 +1677,13 @@ PatchProvideCurrentCpuInfo (
   //
   IsTigerCacheUnsupported = (IsTigerOld || IsTigerNew) && IsLeaf4CacheSupported;
 
-  Status  = EFI_SUCCESS;
-  Status |= PatchProvideCurrentCpuInfoMSR35h (Patcher, CpuInfo, KernelVersion);
+  Status = PatchProvideCurrentCpuInfoMSR35h (Patcher, CpuInfo, KernelVersion, Cpuid1Ebx, Cpuid1Edx);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_WARN, "OCAK: Failed to patch CPU topology - %r\n", Status));
+    return Status;
+  }
+
+  Status = EFI_SUCCESS;
 
   //
   // Pull required symbols.

@@ -97,6 +97,9 @@ OcKernelApplyPatches (
   BOOLEAN                IsKernelPatch;
   UINTN                  RegisterBase;
   UINT32                 RegisterStride;
+  UINT32                 Cpuid1Ebx;
+  UINT32                 Cpuid1Edx;
+  BOOLEAN                CpuIdPatchFailed;
 
   IsKernelPatch = Context == NULL;
 
@@ -228,6 +231,10 @@ OcKernelApplyPatches (
       OcKernelApplyQuirk (KernelQuirkPanicNoKextDump, CacheType, DarwinVersion, NULL, &KernelPatcher);
     }
 
+    Cpuid1Ebx        = CpuInfo->CpuidVerEbx.Uint32;
+    Cpuid1Edx        = CpuInfo->CpuidVerEdx.Uint32;
+    CpuIdPatchFailed = FALSE;
+
     if (  (Config->Kernel.Emulate.Cpuid1Data[0] != 0)
        || (Config->Kernel.Emulate.Cpuid1Data[1] != 0)
        || (Config->Kernel.Emulate.Cpuid1Data[2] != 0)
@@ -236,13 +243,26 @@ OcKernelApplyPatches (
       MaxKernel = OcParseDarwinVersion (OC_BLOB_GET (&Config->Kernel.Emulate.MaxKernel));
       MinKernel = OcParseDarwinVersion (OC_BLOB_GET (&Config->Kernel.Emulate.MinKernel));
       if (OcMatchDarwinVersion (DarwinVersion, MinKernel, MaxKernel)) {
-        PatchKernelCpuId (
-          &KernelPatcher,
-          CpuInfo,
-          Config->Kernel.Emulate.Cpuid1Data,
-          Config->Kernel.Emulate.Cpuid1Mask,
-          DarwinVersion
-          );
+        Status = PatchKernelCpuId (
+                   &KernelPatcher,
+                   CpuInfo,
+                   Config->Kernel.Emulate.Cpuid1Data,
+                   Config->Kernel.Emulate.Cpuid1Mask,
+                   DarwinVersion
+                   );
+        if (EFI_ERROR (Status)) {
+          //
+          // CPUID patching may have partially modified the kernel. Do not
+          // derive another topology patch from an unconfirmed CPUID value.
+          //
+          CpuIdPatchFailed = TRUE;
+          DEBUG ((DEBUG_WARN, "OC: Kernel CPUID patch failed - %r\n", Status));
+        } else {
+          Cpuid1Ebx = (Config->Kernel.Emulate.Cpuid1Data[1] & Config->Kernel.Emulate.Cpuid1Mask[1])
+                      | (Cpuid1Ebx & ~Config->Kernel.Emulate.Cpuid1Mask[1]);
+          Cpuid1Edx = (Config->Kernel.Emulate.Cpuid1Data[3] & Config->Kernel.Emulate.Cpuid1Mask[3])
+                      | (Cpuid1Edx & ~Config->Kernel.Emulate.Cpuid1Mask[3]);
+        }
       } else {
         DEBUG ((
           DEBUG_INFO,
@@ -272,7 +292,12 @@ OcKernelApplyPatches (
     }
 
     if (Config->Kernel.Quirks.ProvideCurrentCpuInfo) {
-      PatchProvideCurrentCpuInfo (&KernelPatcher, CpuInfo, DarwinVersion);
+      if (CpuIdPatchFailed) {
+        DEBUG ((DEBUG_WARN, "OC: Skipping CPU information patch after CPUID patch failure\n"));
+      } else {
+        Status = PatchProvideCurrentCpuInfo (&KernelPatcher, CpuInfo, DarwinVersion, Cpuid1Ebx, Cpuid1Edx);
+        DEBUG ((DEBUG_INFO, "OC: ProvideCurrentCpuInfo - %r\n", Status));
+      }
     }
   }
 

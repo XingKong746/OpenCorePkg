@@ -1374,6 +1374,8 @@ PatchKernelCpuId (
   @param Patcher        Patcher context.
   @param CpuInfo        CPU information.
   @param KernelVersion  Current kernel version.
+  @param Cpuid1Ebx      Effective CPUID.1 EBX exposed to the kernel.
+  @param Cpuid1Edx      Effective CPUID.1 EDX exposed to the kernel.
 
   @return  EFI_SUCCESS on success.
 **/
@@ -1381,7 +1383,9 @@ EFI_STATUS
 PatchProvideCurrentCpuInfo (
   IN OUT PATCHER_CONTEXT  *Patcher,
   IN     OC_CPU_INFO      *CpuInfo,
-  IN     UINT32           KernelVersion
+  IN     UINT32           KernelVersion,
+  IN     UINT32           Cpuid1Ebx,
+  IN     UINT32           Cpuid1Edx
   );
 
 /**
